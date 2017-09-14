@@ -192,6 +192,11 @@ if test "x$have_wayland" = xyes ; then
 	fi
 fi
 
+PKG_CHECK_MODULES(WHOOPSIE, libwhoopsie-preferences, have_whoopsie=yes, have_whoopsie=no)
+if test "x$have_whoopsie" = xyes ; then
+	AC_DEFINE(HAVE_WHOOPSIE, 1, [System has libwhoopsie-preferences])
+fi
+
 # Panels that must be built on Linux systems
 linux_error_or_warn()
 {

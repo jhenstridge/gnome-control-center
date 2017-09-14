@@ -18,6 +18,8 @@
  * Author: Matthias Clasen <mclasen@redhat.com>
  */
 
+#include <config.h>
+
 #include "shell/list-box-helper.h"
 #include "cc-privacy-panel.h"
 #include "cc-privacy-resources.h"
@@ -25,6 +27,12 @@
 
 #include <gio/gdesktopappinfo.h>
 #include <glib/gi18n.h>
+
+#ifdef HAVE_WHOOPSIE
+#  include <whoopsie-preferences/libwhoopsie-preferences.h>
+#else
+typedef struct _WhoopsiePreferences WhoopsiePreferences;
+#endif
 
 CC_PANEL_REGISTER (CcPrivacyPanel, cc_privacy_panel)
 
@@ -64,7 +72,10 @@ struct _CcPrivacyPanelPrivate
 
   GtkWidget  *abrt_dialog;
   GtkWidget  *abrt_row;
+  GtkWidget  *abrt_status;
+  GtkWidget  *abrt_switch;
   guint       abrt_watch_id;
+  WhoopsiePreferences *whoopsie;
 
   GCancellable *cancellable;
 
@@ -1190,25 +1201,56 @@ abrt_vanished_cb (GDBusConnection *connection,
   gtk_widget_hide (self->priv->abrt_row);
 }
 
+#ifdef HAVE_WHOOPSIE
+static void
+whoopsie_properties_changed (WhoopsiePreferences *whoopsie,
+                             GVariant            *changed_properties,
+                             const char *const   *invalidated_properties,
+                             gpointer             user_data)
+{
+  CcPrivacyPanel *self = user_data;
+  gboolean report_crashes = whoopsie_preferences_get_report_crashes (whoopsie);
+
+  gtk_label_set_text (GTK_LABEL (self->priv->abrt_status),
+                      report_crashes ? _("Automatic") : _("Manual"));
+  gtk_switch_set_active (GTK_SWITCH (self->priv->abrt_switch), report_crashes);
+}
+
+static void
+whoopsie_switch_activated (GtkSwitch  *sw,
+                           GParamSpec *param_spec,
+                           gpointer    user_data)
+{
+  CcPrivacyPanel *self = user_data;
+  gboolean report_crashes = gtk_switch_get_active (sw);
+  GError *error = NULL;
+
+  whoopsie_preferences_call_set_report_crashes_sync (self->priv->whoopsie,
+                                                     report_crashes, NULL, &error);
+  if (error != NULL)
+    {
+      g_warning ("Failed to toggle crash reporting: %s", error->message);
+      g_error_free (error);
+    }
+}
+#endif
+
 static void
 add_abrt (CcPrivacyPanel *self)
 {
-  GtkWidget *w;
   GtkWidget *dialog;
   char *os_name, *url, *msg;
+  GError *error = NULL;
 
-  w = get_abrt_label (self->priv->privacy_settings, REPORT_TECHNICAL_PROBLEMS);
-  self->priv->abrt_row = add_row (self, _("Problem Reporting"), "abrt_dialog", w);
+  self->priv->abrt_status = gtk_label_new ("");
+  self->priv->abrt_row = add_row (self, _("Problem Reporting"), "abrt_dialog", self->priv->abrt_status);
   gtk_widget_hide (self->priv->abrt_row);
 
   dialog = self->priv->abrt_dialog;
   g_signal_connect (dialog, "delete-event",
                     G_CALLBACK (gtk_widget_hide_on_delete), NULL);
 
-  w = GTK_WIDGET (gtk_builder_get_object (self->priv->builder, "abrt_switch"));
-  g_settings_bind (self->priv->privacy_settings, REPORT_TECHNICAL_PROBLEMS,
-                   w, "active",
-                   G_SETTINGS_BIND_DEFAULT);
+  self->priv->abrt_switch = GTK_WIDGET (gtk_builder_get_object (self->priv->builder, "abrt_switch"));
 
   os_name = get_os_name ();
   /* translators: '%s' is the distributor's name, such as 'Fedora' */
@@ -1229,13 +1271,54 @@ add_abrt (CcPrivacyPanel *self)
   gtk_label_set_markup (GTK_LABEL (gtk_builder_get_object (self->priv->builder, "abrt_policy_linklabel")), msg);
   g_free (msg);
 
-  self->priv->abrt_watch_id = g_bus_watch_name (G_BUS_TYPE_SYSTEM,
-                                                "org.freedesktop.problems.daemon",
-                                                G_BUS_NAME_WATCHER_FLAGS_NONE,
-                                                abrt_appeared_cb,
-                                                abrt_vanished_cb,
-                                                self,
-                                                NULL);
+#ifdef HAVE_WHOOPSIE
+  /* check for whoopsie */
+  self->priv->whoopsie = whoopsie_preferences_proxy_new_for_bus_sync (G_BUS_TYPE_SYSTEM,
+                                                                      G_DBUS_PROXY_FLAGS_NONE,
+                                                                      "com.ubuntu.WhoopsiePreferences",
+                                                                      "/com/ubuntu/WhoopsiePreferences",
+                                                                      NULL, &error);
+
+  if (self->priv->whoopsie)
+    {
+      g_debug ("Whoopsie available");
+
+      g_signal_connect (self->priv->whoopsie, "g-properties-changed",
+                        G_CALLBACK (whoopsie_properties_changed), self);
+      whoopsie_properties_changed (self->priv->whoopsie, NULL, NULL, self);
+      g_signal_connect (self->priv->abrt_switch, "notify::active",
+                        G_CALLBACK (whoopsie_switch_activated), self);
+      gtk_widget_show (self->priv->abrt_row);
+    }
+  else
+#endif
+    {
+      if (error)
+        {
+          g_debug ("Whoopsie unavailable: %s", error->message);
+          g_error_free (error);
+        }
+
+      g_settings_bind_with_mapping (self->priv->privacy_settings,
+                                    REPORT_TECHNICAL_PROBLEMS,
+                                    self->priv->abrt_status, "label",
+                                    G_SETTINGS_BIND_GET,
+                                    abrt_label_mapping_get,
+                                    NULL,
+                                    NULL,
+                                    NULL);
+      g_settings_bind (self->priv->privacy_settings, REPORT_TECHNICAL_PROBLEMS,
+                       self->priv->abrt_switch, "active",
+                       G_SETTINGS_BIND_DEFAULT);
+
+      self->priv->abrt_watch_id = g_bus_watch_name (G_BUS_TYPE_SYSTEM,
+                                                    "org.freedesktop.problems.daemon",
+                                                    G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                    abrt_appeared_cb,
+                                                    abrt_vanished_cb,
+                                                    self,
+                                                    NULL);
+    }
 }
 
 static void
@@ -1266,6 +1349,7 @@ cc_privacy_panel_finalize (GObject *object)
   g_clear_object (&priv->cancellable);
   g_clear_object (&priv->perm_store);
   g_clear_object (&priv->location_icon_size_group);
+  g_clear_object (&priv->whoopsie);
   g_clear_pointer (&priv->location_apps_perms, g_variant_unref);
   g_clear_pointer (&priv->location_apps_data, g_variant_unref);
   g_clear_pointer (&priv->location_app_switches, g_hash_table_unref);

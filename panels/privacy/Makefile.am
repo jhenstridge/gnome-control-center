@@ -3,6 +3,7 @@ cappletname = privacy
 AM_CPPFLAGS = 						\
 	$(PANEL_CFLAGS)					\
 	$(PRIVACY_PANEL_CFLAGS)				\
+	$(WHOOPSIE_CFLAGS)				\
 	-DGNOMELOCALEDIR="\"$(datadir)/locale\""	\
 	-I$(top_srcdir)/panels/common/			\
 	$(NULL)
@@ -18,7 +19,7 @@ libprivacy_la_SOURCES =		\
 	cc-privacy-panel.c	\
 	cc-privacy-panel.h
 
-libprivacy_la_LIBADD = $(PANEL_LIBS) $(PRIVACY_PANEL_LIBS)
+libprivacy_la_LIBADD = $(PANEL_LIBS) $(PRIVACY_PANEL_LIBS) $(WHOOPSIE_LIBS)
 
 resource_files = $(shell glib-compile-resources --sourcedir=$(srcdir) --generate-dependencies $(srcdir)/privacy.gresource.xml)
 cc-privacy-resources.c: privacy.gresource.xml $(resource_files)
